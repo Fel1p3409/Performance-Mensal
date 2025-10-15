@@ -15,12 +15,10 @@
         // Firebase Imports
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, setDoc, onSnapshot, collection, query, writeBatch } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, doc, setDoc, onSnapshot, collection, query, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
         
         // ====================================================================================
         // PASSO 1: CONFIGURE SEU FIREBASE AQUI
-        // Crie um projeto em https://firebase.google.com/ e um Web App.
-        // Copie o objeto de configuração que o Firebase fornecer e cole aqui.
         // ====================================================================================
         const firebaseConfig = {
           apiKey: "AIzaSyCQ7B8SsZvZrCS298R17FO0iRfSavemEzE",
@@ -36,24 +34,25 @@
         // Variáveis Globais
         let monthlyGoal = 2000.00;
         let dailyGR = -300.00;
-        let currentMonthIndex = 9;
-        let currentYear = 2025;
+        let currentMonthIndex = new Date().getMonth();
+        let currentYear = new Date().getFullYear();
         const MONTH_NAMES = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"];
 
         let db, auth, userId = 'anon', currentMonthResults = [], unsubscribe = null;
 
         const initialDataMap = {
-            "outubro": [
+            "2025-outubro": [
                 { date: '2025-10-01', value: 412.00, timestamp: 0 }, { date: '2025-10-02', value: -625.00, timestamp: 0 },
                 { date: '2025-10-03', value: -58.00, timestamp: 0 }, { date: '2025-10-06', value: 237.00, timestamp: 0 },
                 { date: '2025-10-07', value: 47.00, timestamp: 0 }, { date: '2025-10-08', value: -24.00, timestamp: 0 },
                 { date: '2025-10-09', value: 332.00, timestamp: 0 }, { date: '2025-10-10', value: 412.00, timestamp: 0 },
                 { date: '2025-10-13', value: -229.00, timestamp: 0 }, { date: '2025-10-14', value: 498.00, timestamp: 0 },
                 { date: '2025-10-15', value: -793.00, timestamp: 0 }
-            ], "novembro": [], "dezembro": []
+            ]
         };
 
-        let calendarGrid, resumoContainer, resultadoInput, dataInput, loadingIndicator, statusElement, monthSelector, titleElement;
+        let calendarGrid, resumoContainer, loadingIndicator, statusElement, monthSelector, yearSelector, titleElement;
+        let editModal, modalTitle, modalDateInput, modalValueInput;
         
         // Funções de Edição Inline
         window.toggleEdit = function(settingKey) {
@@ -81,7 +80,7 @@
                 onAuthStateChanged(auth, user => {
                     if (user) {
                         userId = user.uid; statusElement.textContent = `Conectado como: ${userId.substring(0, 6)}...`;
-                        listenForSettings(); changeMonth();
+                        listenForSettings(); updateView();
                     } else { userId = 'anon'; statusElement.textContent = 'Desconectado'; loadingIndicator.classList.add('hidden'); }
                 });
             } catch (error) { statusElement.textContent = `ERRO: ${error.message}`; loadingIndicator.classList.add('hidden'); }
@@ -94,69 +93,43 @@
              });
         }
         function getCollectionRef() { return collection(db, `users/${userId}/results_${currentYear}_${MONTH_NAMES[currentMonthIndex]}`); }
-        async function saveResult(e) {
-            e.preventDefault();
-            const dateStr = dataInput.value, value = parseFloat(resultadoInput.value.replace(',', '.'));
-            if (!dateStr || isNaN(value)) return;
-            const inputDate = new Date(dateStr);
-            if (inputDate.getFullYear() !== currentYear || inputDate.getMonth() !== currentMonthIndex) return;
-            await setDoc(doc(getCollectionRef(), dateStr), { date: dateStr, value: value, timestamp: new Date().getTime() });
-            resultadoInput.value = '';
-        }
 
         function listenForResults() {
             if (unsubscribe) unsubscribe();
             const q = query(getCollectionRef());
             unsubscribe = onSnapshot(q, snapshot => {
                 loadingIndicator.classList.add('hidden');
-                // Se o banco de dados para o mês estiver vazio E tivermos dados iniciais, popule o banco.
-                if (snapshot.empty && (initialDataMap[MONTH_NAMES[currentMonthIndex]] || []).length > 0) {
-                    seedInitialData();
-                } else {
-                    const dbResults = snapshot.docs.map(doc => doc.data());
-                    currentMonthResults = dbResults.sort((a, b) => a.date.localeCompare(b.date));
-                    updateUI();
+                
+                const dbResults = snapshot.docs.map(doc => doc.data());
+                const initialDataKey = `${currentYear}-${MONTH_NAMES[currentMonthIndex]}`;
+                const initialData = initialDataMap[initialDataKey] || [];
+                
+                const combinedResultsMap = new Map();
+                if (currentYear === 2025 && currentMonthIndex === 9) {
+                     initialData.forEach(item => combinedResultsMap.set(item.date, item));
                 }
+                dbResults.forEach(item => combinedResultsMap.set(item.date, item));
+
+                currentMonthResults = Array.from(combinedResultsMap.values()).sort((a, b) => a.date.localeCompare(b.date));
+                updateUI();
+
             }, (error) => {
                 console.error("Erro ao ouvir resultados:", error);
                 loadingIndicator.classList.add('hidden');
             });
         }
 
-        async function seedInitialData() {
-            const monthName = MONTH_NAMES[currentMonthIndex];
-            const initialData = initialDataMap[monthName] || [];
-            if (initialData.length === 0) return;
-
-            console.log(`Populando o banco de dados com os dados iniciais de ${monthName}...`);
-            const collectionRef = getCollectionRef();
-            const batch = writeBatch(db);
-
-            initialData.forEach(item => {
-                const docRef = doc(collectionRef, item.date);
-                batch.set(docRef, item);
-            });
-
-            try {
-                await batch.commit();
-                // O listener onSnapshot irá receber os novos dados e atualizar a UI.
-            } catch (error) {
-                console.error("Erro ao popular dados iniciais:", error);
-            }
-        }
-
-        function changeMonth() {
+        function updateView() {
+            currentYear = parseInt(yearSelector.value);
             currentMonthIndex = parseInt(monthSelector.value);
             titleElement.textContent = `Performance Mensal`;
-            const daysInMonth = new Date(currentYear, currentMonthIndex + 1, 0).getDate(), paddedMonth = (currentMonthIndex + 1).toString().padStart(2, '0');
-            dataInput.min = `${currentYear}-${paddedMonth}-01`; dataInput.max = `${currentYear}-${paddedMonth}-${daysInMonth}`;
             if (userId !== 'anon') listenForResults(); else updateUI();
         }
         function calculateDailyTarget(totalAcumulado) {
             const daysInMonth = new Date(currentYear, currentMonthIndex + 1, 0).getDate();
             let lastResultDay = 0; if (currentMonthResults.length > 0) lastResultDay = parseInt(currentMonthResults[currentMonthResults.length - 1].date.split('-')[2]);
-            const today = new Date(), isCurrentMonth = today.getMonth() === currentMonthIndex && today.getFullYear() === currentYear;
-            let startDayForCalculation = isCurrentMonth ? Math.max(lastResultDay + 1, today.getDate()) : 1, remainingWorkingDays = 0;
+            const today = new Date(), isCurrentMonthAndYear = today.getMonth() === currentMonthIndex && today.getFullYear() === currentYear;
+            let startDayForCalculation = isCurrentMonthAndYear ? Math.max(lastResultDay + 1, today.getDate()) : 1, remainingWorkingDays = 0;
             for (let day = startDayForCalculation; day <= daysInMonth; day++) { const d = new Date(currentYear, currentMonthIndex, day); if (d.getDay() >= 1 && d.getDay() <= 5) remainingWorkingDays++; }
             const remainingGoal = monthlyGoal - totalAcumulado;
             return { dailyTarget: remainingWorkingDays > 0 ? remainingGoal / remainingWorkingDays : 0, remainingWorkingDays };
@@ -182,7 +155,7 @@
                     if (value > 0) { cellClasses += " dia-positivo"; valueClasses += " text-positivo"; } 
                     else { cellClasses += " dia-negativo"; valueClasses += " text-negativo"; if (value < dailyGR) cellClasses += " gr-excedido"; }
                 }
-                calendarGrid.insertAdjacentHTML('beforeend', `<div class="${cellClasses}"><div class="${dayNumberClasses}">${day}</div><div class="${valueClasses}">${displayValue}</div></div>`);
+                calendarGrid.insertAdjacentHTML('beforeend', `<div class="${cellClasses}" onclick="window.openEditModal('${dateISO}')"><div class="${dayNumberClasses}">${day}</div><div class="${valueClasses}">${displayValue}</div></div>`);
             }
         }
         function renderSummary(metrics) {
@@ -195,13 +168,53 @@
                 <div class="summary-section"><div class="summary-item"><span class="summary-label">Falta para Objetivo</span><span class="summary-value">${formatCurrency(metrics.faltaObjetivo, false)}</span></div><div class="summary-item"><span class="summary-label">Meta Diária (Estimada)</span><span class="summary-value">${metrics.remainingWorkingDays > 0 ? formatCurrency(metrics.dailyTarget) : 'N/A'}</span></div></div>
                 <div class="summary-section grid grid-cols-2 gap-4"><div class="summary-item-small"><span class="summary-label">Dias Positivos</span><span class="summary-value text-positivo">${metrics.diasPositivos}</span></div><div class="summary-item-small"><span class="summary-label">Dias Negativos</span><span class="summary-value text-negativo">${metrics.diasNegativos}</span></div><div class="summary-item-small col-span-2"><span class="summary-label">Média Dias Positivos</span><span class="summary-value text-sm">${formatCurrency(metrics.mediaPositivos, false)}</span></div><div class="summary-item-small col-span-2"><span class="summary-label">Média Dias Negativos</span><span class="summary-value text-sm">${formatCurrency(metrics.mediaNegativos)}</span></div></div>`;
         }
+        
+        // Funções do Modal
+        window.openEditModal = function(dateStr) {
+            const result = currentMonthResults.find(r => r.date === dateStr);
+            modalDateInput.value = dateStr;
+            const formattedDate = new Date(dateStr + 'T00:00:00').toLocaleDateString('pt-BR', {day: '2-digit', month: 'long'});
+            modalTitle.textContent = `Resultado • ${formattedDate}`;
+            modalValueInput.value = result ? result.value.toFixed(2) : '';
+            editModal.classList.remove('hidden');
+            modalValueInput.focus();
+        }
+        window.closeModal = function() {
+            editModal.classList.add('hidden');
+        }
+        async function saveFromModal() {
+            const dateStr = modalDateInput.value;
+            const valueStr = modalValueInput.value;
+
+            if (valueStr.trim() === '') {
+                try {
+                    await deleteDoc(doc(getCollectionRef(), dateStr));
+                } catch(e) { console.error("Erro ao deletar:", e) }
+            } else {
+                const value = parseFloat(valueStr.replace(',', '.'));
+                if (isNaN(value)) { alert("Por favor, insira um valor numérico válido."); return; }
+                try {
+                    await setDoc(doc(getCollectionRef(), dateStr), { date: dateStr, value: value, timestamp: new Date().getTime() });
+                } catch(e) { console.error("Erro ao salvar:", e) }
+            }
+            closeModal();
+        }
+
         document.addEventListener('DOMContentLoaded', () => {
             calendarGrid = document.getElementById('calendar-grid'); resumoContainer = document.getElementById('resumo-metrics');
-            resultadoInput = document.getElementById('resultado-input'); dataInput = document.getElementById('data-input');
             loadingIndicator = document.getElementById('loading-indicator'); statusElement = document.getElementById('auth-status');
-            monthSelector = document.getElementById('month-selector'); titleElement = document.getElementById('monthly-title');
-            document.getElementById('add-form').addEventListener('submit', saveResult); monthSelector.addEventListener('change', changeMonth);
-            monthSelector.value = currentMonthIndex; changeMonth(); initializeFirebase();
+            monthSelector = document.getElementById('month-selector'); yearSelector = document.getElementById('year-selector');
+            titleElement = document.getElementById('monthly-title');
+            editModal = document.getElementById('edit-modal'); modalTitle = document.getElementById('modal-title');
+            modalDateInput = document.getElementById('modal-date'); modalValueInput = document.getElementById('modal-value');
+            
+            yearSelector.value = currentYear; monthSelector.value = currentMonthIndex;
+            
+            monthSelector.addEventListener('change', updateView); yearSelector.addEventListener('change', updateView);
+            document.getElementById('modal-save').addEventListener('click', saveFromModal);
+            document.getElementById('modal-cancel').addEventListener('click', closeModal);
+            
+            initializeFirebase();
         });
     </script>
     <style>
@@ -213,17 +226,19 @@
         #monthly-title { color: var(--neon-cyan); text-shadow: 0 0 10px rgba(0, 255, 255, 0.5), 0 0 20px rgba(0, 255, 255, 0.3); }
         .tech-input, .tech-select { background-color: var(--bg-deep-black); border: 1px solid var(--neon-blue); color: var(--text-primary); border-radius: 8px; padding: 0.75rem; box-shadow: 0 0 8px rgba(0, 123, 255, 0.3), inset 0 0 5px rgba(0, 123, 255, 0.2); transition: all 0.3s ease; }
         .tech-input:focus, .tech-select:focus { outline: none; box-shadow: 0 0 12px rgba(0, 123, 255, 0.7), inset 0 0 8px rgba(0, 123, 255, 0.4); border-color: var(--neon-cyan); }
-        .tech-button { background: linear-gradient(45deg, var(--neon-blue), var(--neon-cyan)); color: var(--bg-deep-black); font-weight: 700; border-radius: 8px; padding: 0.75rem; border: none; box-shadow: 0 0 15px rgba(0, 123, 255, 0.5); transition: all 0.3s ease; }
+        .tech-button { background: linear-gradient(45deg, var(--neon-blue), var(--neon-cyan)); color: var(--bg-deep-black); font-weight: 700; border-radius: 8px; padding: 0.75rem 1.5rem; border: none; box-shadow: 0 0 15px rgba(0, 123, 255, 0.5); transition: all 0.3s ease; }
         .tech-button:hover { box-shadow: 0 0 25px rgba(0, 255, 255, 0.7); transform: translateY(-2px); }
+        .tech-button.cancel { background: #4B5563; color: var(--text-primary); }
         .calendar-header { display: grid; grid-template-columns: repeat(7, 1fr); text-align: center; font-weight: 700; padding: 1rem 0; color: var(--neon-cyan); border-bottom: 1px solid var(--border-color); }
         .calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 8px; padding: 8px; }
-        .calendar-day { min-height: 90px; padding: 8px; border-radius: 8px; background-color: rgba(255, 255, 255, 0.03); display: flex; flex-direction: column; justify-content: space-between; transition: all 0.3s ease; border: 1px solid transparent; }
+        .calendar-day { min-height: 90px; padding: 8px; border-radius: 8px; background-color: rgba(255, 255, 255, 0.03); display: flex; flex-direction: column; justify-content: space-between; transition: all 0.3s ease; border: 1px solid transparent; cursor: pointer; }
         .calendar-day:hover { transform: translateY(-4px); background-color: rgba(0, 123, 255, 0.1); border-color: var(--border-color); }
         .day-number { font-weight: 600; color: var(--text-secondary); } .day-result { text-align: right; font-weight: 700; font-size: 0.9rem; }
         .dia-positivo { border-left: 4px solid var(--positive-green); } .dia-negativo { border-left: 4px solid var(--negative-red); }
         .text-positivo { color: var(--positive-green); text-shadow: 0 0 5px rgba(57, 255, 20, 0.5); } .text-negativo { color: var(--negative-red); text-shadow: 0 0 5px rgba(255, 49, 49, 0.5); }
         .gr-excedido { background-color: rgba(255, 49, 49, 0.15); border: 1px solid var(--negative-red); box-shadow: 0 0 10px rgba(255, 49, 49, 0.4); }
-        .final-semana { background-color: rgba(255, 255, 255, 0.01); } .empty-day { background-color: transparent; opacity: 0.5; }
+        .final-semana { background-color: rgba(255, 255, 255, 0.01); } .empty-day { background-color: transparent; opacity: 0.5; cursor: default; }
+        .empty-day:hover { transform: none; background: transparent; border-color: transparent; }
         .summary-section { padding: 1rem 0; border-bottom: 1px solid var(--border-color); } .summary-section:last-child { border-bottom: none; }
         .summary-item, .summary-item-small { display: flex; justify-content: space-between; align-items: center; padding: 0.5rem 0; }
         .summary-item-small { flex-direction: column; align-items: flex-start; background-color: rgba(0,0,0,0.2); padding: 0.75rem; border-radius: 8px; }
@@ -242,30 +257,32 @@
         </h1>
         
         <div class="panel p-4 lg:p-6 mb-6">
-            <div class="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
-                <div class="col-span-1 md:col-span-1">
-                    <label for="month-selector" class="block text-sm font-medium text-gray-400 mb-2">Mês de Análise</label>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 items-end">
+                <div>
+                     <label for="year-selector" class="block text-sm font-medium text-gray-400 mb-2">Ano</label>
+                     <select id="year-selector" class="tech-select w-full">
+                         <option>2024</option>
+                         <option selected>2025</option>
+                         <option>2026</option>
+                     </select>
+                </div>
+                <div>
+                    <label for="month-selector" class="block text-sm font-medium text-gray-400 mb-2">Mês</label>
                     <select id="month-selector" class="tech-select w-full">
-                        <option value="9">Outubro / 2025</option>
-                        <option value="10">Novembro / 2025</option>
-                        <option value="11">Dezembro / 2025</option>
+                        <option value="0">Janeiro</option>
+                        <option value="1">Fevereiro</option>
+                        <option value="2">Março</option>
+                        <option value="3">Abril</option>
+                        <option value="4">Maio</option>
+                        <option value="5">Junho</option>
+                        <option value="6">Julho</option>
+                        <option value="7">Agosto</option>
+                        <option value="8">Setembro</option>
+                        <option value="9">Outubro</option>
+                        <option value="10">Novembro</option>
+                        <option value="11">Dezembro</option>
                     </select>
                 </div>
-                <form id="add-form" class="grid grid-cols-2 md:grid-cols-3 col-span-1 md:col-span-3 gap-4 items-end">
-                    <div class="col-span-1">
-                        <label for="data-input" class="block text-sm font-medium text-gray-400 mb-2">Data</label>
-                        <input type="date" id="data-input" required class="tech-input w-full">
-                    </div>
-                    <div class="col-span-1">
-                        <label for="resultado-input" class="block text-sm font-medium text-gray-400 mb-2">Resultado (R$)</label>
-                        <input type="number" step="0.01" id="resultado-input" placeholder="Ex: 412.00" required class="tech-input w-full">
-                    </div>
-                    <div class="col-span-2 md:col-span-1">
-                        <button type="submit" class="tech-button w-full">
-                            Adicionar Registro
-                        </button>
-                    </div>
-                </form>
             </div>
         </div>
 
@@ -292,6 +309,22 @@
                     <p class="text-center text-gray-500">Aguardando dados...</p>
                 </div>
                 <p id="auth-status" class="text-xs text-center text-gray-600 mt-4">Conectando...</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal de Edição -->
+    <div id="edit-modal" class="fixed inset-0 bg-black bg-opacity-70 backdrop-blur-sm flex items-center justify-center hidden z-50">
+        <div class="panel p-6 w-full max-w-sm">
+            <h3 id="modal-title" class="text-xl font-bold text-cyan-400 mb-4">Editar Resultado</h3>
+            <input type="hidden" id="modal-date">
+            <div>
+                <label for="modal-value" class="block text-sm font-medium text-gray-400 mb-2">Valor do dia (R$)</label>
+                <input type="number" step="0.01" id="modal-value" class="tech-input w-full" placeholder="Deixe em branco para apagar">
+            </div>
+            <div class="flex justify-end gap-4 mt-6">
+                <button id="modal-cancel" class="tech-button cancel">Cancelar</button>
+                <button id="modal-save" class="tech-button">Salvar</button>
             </div>
         </div>
     </div>
