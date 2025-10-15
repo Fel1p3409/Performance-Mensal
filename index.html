@@ -15,7 +15,7 @@
         // Firebase Imports
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, setDoc, onSnapshot, collection, query } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, doc, setDoc, onSnapshot, collection, query, writeBatch } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
         
         // ====================================================================================
         // PASSO 1: CONFIGURE SEU FIREBASE AQUI
@@ -103,17 +103,48 @@
             await setDoc(doc(getCollectionRef(), dateStr), { date: dateStr, value: value, timestamp: new Date().getTime() });
             resultadoInput.value = '';
         }
+
         function listenForResults() {
             if (unsubscribe) unsubscribe();
-            unsubscribe = onSnapshot(query(getCollectionRef()), snapshot => {
+            const q = query(getCollectionRef());
+            unsubscribe = onSnapshot(q, snapshot => {
                 loadingIndicator.classList.add('hidden');
-                const dbResults = snapshot.docs.map(doc => doc.data());
-                let combinedResults = [...dbResults];
-                if (dbResults.length === 0) combinedResults = initialDataMap[MONTH_NAMES[currentMonthIndex]] || [];
-                currentMonthResults = combinedResults.sort((a, b) => a.date.localeCompare(b.date));
-                updateUI();
+                // Se o banco de dados para o mês estiver vazio E tivermos dados iniciais, popule o banco.
+                if (snapshot.empty && (initialDataMap[MONTH_NAMES[currentMonthIndex]] || []).length > 0) {
+                    seedInitialData();
+                } else {
+                    const dbResults = snapshot.docs.map(doc => doc.data());
+                    currentMonthResults = dbResults.sort((a, b) => a.date.localeCompare(b.date));
+                    updateUI();
+                }
+            }, (error) => {
+                console.error("Erro ao ouvir resultados:", error);
+                loadingIndicator.classList.add('hidden');
             });
         }
+
+        async function seedInitialData() {
+            const monthName = MONTH_NAMES[currentMonthIndex];
+            const initialData = initialDataMap[monthName] || [];
+            if (initialData.length === 0) return;
+
+            console.log(`Populando o banco de dados com os dados iniciais de ${monthName}...`);
+            const collectionRef = getCollectionRef();
+            const batch = writeBatch(db);
+
+            initialData.forEach(item => {
+                const docRef = doc(collectionRef, item.date);
+                batch.set(docRef, item);
+            });
+
+            try {
+                await batch.commit();
+                // O listener onSnapshot irá receber os novos dados e atualizar a UI.
+            } catch (error) {
+                console.error("Erro ao popular dados iniciais:", error);
+            }
+        }
+
         function changeMonth() {
             currentMonthIndex = parseInt(monthSelector.value);
             titleElement.textContent = `Performance Mensal`;
