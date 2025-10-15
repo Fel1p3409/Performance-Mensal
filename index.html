@@ -40,17 +40,6 @@
 
         let db, auth, userId = 'anon', currentMonthResults = [], unsubscribe = null;
 
-        const initialDataMap = {
-            "2025-outubro": [
-                { date: '2025-10-01', value: 412.00, timestamp: 0 }, { date: '2025-10-02', value: -625.00, timestamp: 0 },
-                { date: '2025-10-03', value: -58.00, timestamp: 0 }, { date: '2025-10-06', value: 237.00, timestamp: 0 },
-                { date: '2025-10-07', value: 47.00, timestamp: 0 }, { date: '2025-10-08', value: -24.00, timestamp: 0 },
-                { date: '2025-10-09', value: 332.00, timestamp: 0 }, { date: '2025-10-10', value: 412.00, timestamp: 0 },
-                { date: '2025-10-13', value: -229.00, timestamp: 0 }, { date: '2025-10-14', value: 498.00, timestamp: 0 },
-                { date: '2025-10-15', value: -793.00, timestamp: 0 }
-            ]
-        };
-
         let calendarGrid, resumoContainer, loadingIndicator, statusElement, monthSelector, yearSelector, titleElement;
         let editModal, modalTitle, modalDateInput, modalValueInput;
         
@@ -101,16 +90,7 @@
                 loadingIndicator.classList.add('hidden');
                 
                 const dbResults = snapshot.docs.map(doc => doc.data());
-                const initialDataKey = `${currentYear}-${MONTH_NAMES[currentMonthIndex]}`;
-                const initialData = initialDataMap[initialDataKey] || [];
-                
-                const combinedResultsMap = new Map();
-                if (currentYear === 2025 && currentMonthIndex === 9) {
-                     initialData.forEach(item => combinedResultsMap.set(item.date, item));
-                }
-                dbResults.forEach(item => combinedResultsMap.set(item.date, item));
-
-                currentMonthResults = Array.from(combinedResultsMap.values()).sort((a, b) => a.date.localeCompare(b.date));
+                currentMonthResults = dbResults.sort((a, b) => a.date.localeCompare(b.date));
                 updateUI();
 
             }, (error) => {
