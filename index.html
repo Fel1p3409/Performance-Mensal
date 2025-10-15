@@ -56,15 +56,8 @@
             "dezembro": []
         };
 
-        // Elementos DOM
-        const calendarGrid = document.getElementById('calendar-grid');
-        const resumoContainer = document.getElementById('resumo-metrics');
-        const resultadoInput = document.getElementById('resultado-input');
-        const dataInput = document.getElementById('data-input');
-        const loadingIndicator = document.getElementById('loading-indicator');
-        const statusElement = document.getElementById('auth-status');
-        const monthSelector = document.getElementById('month-selector');
-        const titleElement = document.getElementById('monthly-title');
+        // Elementos DOM (Declarados aqui, atribuídos em DOMContentLoaded)
+        let calendarGrid, resumoContainer, resultadoInput, dataInput, loadingIndicator, statusElement, monthSelector, titleElement;
         
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
         const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
@@ -447,14 +440,23 @@
         }
 
         document.addEventListener('DOMContentLoaded', () => {
+            // Atribuição das variáveis DOM após o carregamento
+            calendarGrid = document.getElementById('calendar-grid');
+            resumoContainer = document.getElementById('resumo-metrics');
+            resultadoInput = document.getElementById('resultado-input');
+            dataInput = document.getElementById('data-input');
+            loadingIndicator = document.getElementById('loading-indicator');
+            statusElement = document.getElementById('auth-status');
+            monthSelector = document.getElementById('month-selector');
+            titleElement = document.getElementById('monthly-title');
+
             document.getElementById('add-form').addEventListener('submit', saveResult);
             monthSelector.addEventListener('change', changeMonth);
+            
             monthSelector.value = currentMonthIndex;
             changeMonth(); 
             initializeFirebase();
         });
-
-        window.saveResult = saveResult;
 
     </script>
     <style>
@@ -668,5 +670,4 @@
     </div>
 </body>
 </html>
-
 
