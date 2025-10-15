@@ -1,0 +1,672 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Controle de Performance Mensal - Dashboard</title>
+    <!-- Carregando Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Carregando Fontes Futuristas -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Exo+2:wght@400;600;700;800&display=swap" rel="stylesheet">
+    
+    <script type="module">
+        // Firebase Imports (Necessário para salvar os dados)
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot, collection, query } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Configurações e Variáveis Globais
+        setLogLevel('Debug');
+        
+        // Variáveis de estado para Metas (agora editáveis e salvas)
+        let monthlyGoal = 2000.00; // Objetivo padrão
+        let dailyGR = -300.00; // GR Diário padrão
+        
+        // Estado atual (Inicia em Outubro/2025)
+        let currentMonthIndex = 9; // 9 = Outubro (0-indexado)
+        let currentYear = 2025;
+        
+        const MONTH_NAMES = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"];
+
+        let db;
+        let auth;
+        let userId = 'anon'; // Default ID
+        let currentMonthResults = [];
+        let unsubscribe = null; // Para parar de escutar o mês anterior
+
+        // Dados Iniciais Carregados (Mapeados por mês)
+        const initialDataMap = {
+            "outubro": [
+                { date: '2025-10-01', value: 412.00, timestamp: 0 },
+                { date: '2025-10-02', value: -625.00, timestamp: 0 },
+                { date: '2025-10-03', value: -58.00, timestamp: 0 },
+                { date: '2025-10-06', value: 237.00, timestamp: 0 },
+                { date: '2025-10-07', value: 47.00, timestamp: 0 },
+                { date: '2025-10-08', value: -24.00, timestamp: 0 },
+                { date: '2025-10-09', value: 332.00, timestamp: 0 },
+                { date: '2025-10-10', value: 412.00, timestamp: 0 },
+                { date: '2025-10-13', value: -229.00, timestamp: 0 },
+                { date: '2025-10-14', value: 498.00, timestamp: 0 },
+                { date: '2025-10-15', value: -793.00, timestamp: 0 }
+            ],
+            "novembro": [],
+            "dezembro": []
+        };
+
+        // Elementos DOM
+        const calendarGrid = document.getElementById('calendar-grid');
+        const resumoContainer = document.getElementById('resumo-metrics');
+        const resultadoInput = document.getElementById('resultado-input');
+        const dataInput = document.getElementById('data-input');
+        const loadingIndicator = document.getElementById('loading-indicator');
+        const statusElement = document.getElementById('auth-status');
+        const monthSelector = document.getElementById('month-selector');
+        const titleElement = document.getElementById('monthly-title');
+        
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        // --- Funções de Edição Inline ---
+        
+        window.toggleEdit = function(settingKey) {
+            const displayElement = document.getElementById(`display-${settingKey}`);
+            const inputElement = document.getElementById(`input-${settingKey}`);
+            if (!displayElement || !inputElement) return;
+            displayElement.classList.add('hidden');
+            inputElement.classList.remove('hidden');
+            inputElement.focus();
+        }
+
+        window.updateSettingFromInline = async function(settingKey, newValueStr) {
+            const newValue = parseFloat(newValueStr.replace(',', '.'));
+            
+            const displayElement = document.getElementById(`display-${settingKey}`);
+            const inputElement = document.getElementById(`input-${settingKey}`);
+            if (displayElement && inputElement) {
+                inputElement.classList.add('hidden');
+                displayElement.classList.remove('hidden');
+            }
+            
+            if (isNaN(newValue)) {
+                console.warn('AVISO: Valor inválido inserido. Revertendo...');
+                updateUI(); 
+                return;
+            }
+
+            let valueChanged = false;
+            const settingsToSave = {};
+            
+            if (settingKey === 'monthlyGoal' && monthlyGoal !== newValue) {
+                if (newValue < 0) {
+                     console.warn('AVISO: O Objetivo Mensal deve ser um valor positivo.');
+                     updateUI(); return;
+                }
+                settingsToSave.monthlyGoal = newValue;
+                valueChanged = true;
+            } else if (settingKey === 'dailyGR' && dailyGR !== newValue) {
+                 if (newValue > 0) {
+                     console.warn('AVISO: O GR Diário deve ser um valor negativo.');
+                     updateUI(); return;
+                }
+                settingsToSave.dailyGR = newValue;
+                valueChanged = true;
+            }
+
+            if (valueChanged) {
+                try {
+                    await setDoc(getSettingsRef(), settingsToSave, { merge: true });
+                } catch (error) {
+                    console.error("Erro ao salvar configuração inline:", error);
+                }
+            } else {
+                 updateUI();
+            }
+        }
+        
+        // --- Funções de Inicialização e Lógica do App ---
+
+        async function initializeFirebase() {
+            if (!firebaseConfig) {
+                console.error("Firebase config is missing.");
+                statusElement.textContent = 'ERRO: Configuração do Firebase ausente.';
+                return;
+            }
+
+            try {
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                
+                loadingIndicator.classList.remove('hidden');
+
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+                
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        statusElement.textContent = `Usuário: ${userId.substring(0, 6)}...`;
+                        listenForSettings();
+                        changeMonth();
+                    } else {
+                        userId = 'anon';
+                        statusElement.textContent = 'Anônimo';
+                        loadingIndicator.classList.add('hidden');
+                    }
+                });
+
+            } catch (error) {
+                console.error("Erro na inicialização ou autenticação do Firebase:", error);
+                statusElement.textContent = `ERRO: ${error.message}`;
+                loadingIndicator.classList.add('hidden');
+            }
+        }
+
+        function getSettingsRef() {
+            return doc(db, `artifacts/${appId}/users/${userId}/settings/global_targets`);
+        }
+        
+        function listenForSettings() {
+             onSnapshot(getSettingsRef(), (docSnapshot) => {
+                 if (docSnapshot.exists()) {
+                     const settings = docSnapshot.data();
+                     monthlyGoal = settings.monthlyGoal || 2000.00;
+                     dailyGR = settings.dailyGR || -300.00;
+                 } else {
+                     monthlyGoal = 2000.00;
+                     dailyGR = -300.00;
+                 }
+                 updateUI(); 
+             }, (error) => {
+                 console.error("Erro ao ouvir configurações:", error);
+             });
+        }
+
+        function getCollectionRef() {
+            const monthName = MONTH_NAMES[currentMonthIndex];
+            return collection(db, `artifacts/${appId}/users/${userId}/results_${currentYear}_${monthName}`);
+        }
+
+        async function saveResult(e) {
+            e.preventDefault();
+            
+            const dateStr = dataInput.value;
+            const value = parseFloat(resultadoInput.value.replace(',', '.'));
+
+            if (!dateStr || isNaN(value)) {
+                console.warn('AVISO: Por favor, insira uma data e um valor válido.');
+                return;
+            }
+
+            const inputDate = new Date(dateStr);
+            
+            if (inputDate.getFullYear() !== currentYear || inputDate.getMonth() !== currentMonthIndex) {
+                console.warn(`AVISO: A data precisa ser do mês de ${MONTH_NAMES[currentMonthIndex].toUpperCase()}/${currentYear}.`);
+                return;
+            }
+
+            try {
+                const docRef = doc(getCollectionRef(), dateStr);
+                await setDoc(docRef, {
+                    date: dateStr,
+                    value: value,
+                    timestamp: new Date().getTime()
+                });
+                resultadoInput.value = '';
+            } catch (error) {
+                console.error("Erro ao salvar o resultado:", error);
+            }
+        }
+
+        function listenForResults() {
+            if (unsubscribe) unsubscribe();
+
+            const q = query(getCollectionRef());
+            unsubscribe = onSnapshot(q, (snapshot) => {
+                loadingIndicator.classList.add('hidden');
+                
+                const dbResults = snapshot.docs.map(doc => doc.data());
+
+                let combinedResults = [...dbResults];
+                if (dbResults.length === 0) {
+                    const monthName = MONTH_NAMES[currentMonthIndex];
+                    combinedResults = initialDataMap[monthName] || [];
+                }
+                
+                currentMonthResults = combinedResults.sort((a, b) => a.date.localeCompare(b.date));
+                updateUI();
+            }, (error) => {
+                console.error("Erro ao ouvir resultados:", error);
+                loadingIndicator.classList.add('hidden');
+            });
+        }
+        
+        function changeMonth() {
+            currentMonthIndex = parseInt(monthSelector.value);
+            
+            const monthName = MONTH_NAMES[currentMonthIndex];
+            titleElement.textContent = `Performance Mensal`;
+
+            const daysInMonth = new Date(currentYear, currentMonthIndex + 1, 0).getDate();
+            const paddedMonth = (currentMonthIndex + 1).toString().padStart(2, '0');
+            dataInput.min = `${currentYear}-${paddedMonth}-01`;
+            dataInput.max = `${currentYear}-${paddedMonth}-${daysInMonth}`;
+            
+            if (userId !== 'anon') listenForResults();
+            else updateUI();
+        }
+
+        function calculateDailyTarget(totalAcumulado) {
+            const daysInMonth = new Date(currentYear, currentMonthIndex + 1, 0).getDate();
+            let lastResultDay = 0;
+            if (currentMonthResults.length > 0) {
+                lastResultDay = parseInt(currentMonthResults[currentMonthResults.length - 1].date.split('-')[2]);
+            }
+            
+            const today = new Date();
+            const isCurrentMonth = today.getMonth() === currentMonthIndex && today.getFullYear() === currentYear;
+            let startDayForCalculation = isCurrentMonth ? Math.max(lastResultDay + 1, today.getDate()) : 1;
+
+            let remainingWorkingDays = 0;
+            for (let day = startDayForCalculation; day <= daysInMonth; day++) {
+                const d = new Date(currentYear, currentMonthIndex, day);
+                if (d.getDay() >= 1 && d.getDay() <= 5) remainingWorkingDays++;
+            }
+
+            const remainingGoal = monthlyGoal - totalAcumulado;
+            const dailyTarget = remainingWorkingDays > 0 ? remainingGoal / remainingWorkingDays : 0;
+
+            return { dailyTarget, remainingWorkingDays };
+        }
+
+        function calculateMetrics() {
+            const results = currentMonthResults.map(r => r.value);
+            const positiveResults = results.filter(v => v > 0);
+            const negativeResults = results.filter(v => v < 0);
+
+            const total = results.reduce((sum, v) => sum + v, 0);
+            const mediaPositivos = positiveResults.length > 0 ? positiveResults.reduce((s, v) => s + v, 0) / positiveResults.length : 0;
+            const mediaNegativos = negativeResults.length > 0 ? negativeResults.reduce((s, v) => s + v, 0) / negativeResults.length : 0;
+            const faltaObjetivo = Math.max(0, monthlyGoal - total);
+            const { dailyTarget, remainingWorkingDays } = calculateDailyTarget(total);
+
+            return {
+                total,
+                diasPositivos: positiveResults.length,
+                diasNegativos: negativeResults.length,
+                mediaPositivos,
+                mediaNegativos,
+                faltaObjetivo,
+                dailyTarget,
+                remainingWorkingDays,
+                META_OBJETIVO: monthlyGoal,
+                GR_DIARIO: dailyGR
+            };
+        }
+
+        function updateUI() {
+            const metrics = calculateMetrics();
+            renderCalendar();
+            renderSummary(metrics);
+        }
+
+        function renderCalendar() {
+            calendarGrid.innerHTML = '';
+            const resultsMap = new Map(currentMonthResults.map(item => [item.date, item.value]));
+            const firstDayOfMonth = new Date(currentYear, currentMonthIndex, 1);
+            const daysInMonth = new Date(currentYear, currentMonthIndex + 1, 0).getDate();
+            const startingDayOfWeek = firstDayOfMonth.getDay(); 
+
+            for (let i = 0; i < startingDayOfWeek; i++) {
+                calendarGrid.insertAdjacentHTML('beforeend', '<div class="calendar-day empty-day"></div>');
+            }
+
+            for (let day = 1; day <= daysInMonth; day++) {
+                const d = new Date(currentYear, currentMonthIndex, day);
+                const dateISO = d.toISOString().split('T')[0];
+                const dayOfWeek = d.getDay();
+                
+                const value = resultsMap.get(dateISO);
+                
+                let cellClasses = "calendar-day";
+                let valueClasses = "day-result";
+                let dayNumberClasses = "day-number";
+                let displayValue = '';
+                
+                if (dayOfWeek === 0 || dayOfWeek === 6) cellClasses += " final-semana";
+
+                if (value !== undefined) {
+                    displayValue = `R$ ${new Intl.NumberFormat('pt-BR', { minimumFractionDigits: 2 }).format(value)}`;
+                    if (value > 0) {
+                        cellClasses += " dia-positivo";
+                        valueClasses += " text-positivo";
+                    } else {
+                        cellClasses += " dia-negativo";
+                        valueClasses += " text-negativo";
+                        if (value < dailyGR) {
+                            cellClasses += " gr-excedido";
+                            dayNumberClasses += " text-red-400";
+                        }
+                    }
+                }
+                
+                calendarGrid.insertAdjacentHTML('beforeend', `
+                    <div class="${cellClasses}">
+                        <div class="${dayNumberClasses}">${day}</div>
+                        <div class="${valueClasses}">${displayValue}</div>
+                    </div>
+                `);
+            }
+        }
+
+        function renderSummary(metrics) {
+            const formatCurrency = (amount, includeSign = true) => {
+                const options = { style: 'currency', currency: 'BRL' };
+                if (!includeSign) amount = Math.abs(amount);
+                return new Intl.NumberFormat('pt-BR', options).format(amount);
+            };
+
+            const goalProgress = metrics.META_OBJETIVO > 0 ? (metrics.total / metrics.META_OBJETIVO) * 100 : 0;
+
+            resumoContainer.innerHTML = `
+                <div class="summary-section">
+                    <div class="summary-item" onclick="window.toggleEdit('monthlyGoal')">
+                        <div class="flex items-center gap-2 cursor-pointer">
+                           <span class="summary-label">Objetivo</span>
+                           <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4 text-gray-500 hover:text-cyan-400 transition-colors">
+                             <path stroke-linecap="round" stroke-linejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125M18 9.75l-1.406-1.406" />
+                           </svg>
+                        </div>
+                        <span id="display-monthlyGoal" class="summary-value text-positivo">${formatCurrency(metrics.META_OBJETIVO, false)}</span>
+                        <input id="input-monthlyGoal" type="number" step="0.01" class="summary-input hidden" value="${metrics.META_OBJETIVO.toFixed(2)}" onblur="window.updateSettingFromInline('monthlyGoal', this.value)" onkeydown="if(event.key === 'Enter') this.blur()">
+                    </div>
+                    <div class="summary-item" onclick="window.toggleEdit('dailyGR')">
+                        <div class="flex items-center gap-2 cursor-pointer">
+                           <span class="summary-label">GR Diário</span>
+                           <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4 text-gray-500 hover:text-cyan-400 transition-colors">
+                             <path stroke-linecap="round" stroke-linejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125M18 9.75l-1.406-1.406" />
+                           </svg>
+                        </div>
+                        <span id="display-dailyGR" class="summary-value text-negativo">${formatCurrency(metrics.GR_DIARIO)}</span>
+                        <input id="input-dailyGR" type="number" step="0.01" class="summary-input hidden" value="${metrics.GR_DIARIO.toFixed(2)}" onblur="window.updateSettingFromInline('dailyGR', this.value)" onkeydown="if(event.key === 'Enter') this.blur()">
+                    </div>
+                </div>
+
+                <div class="summary-section total-section">
+                    <span class="summary-label">Total Acumulado</span>
+                    <span class="summary-value text-2xl">${formatCurrency(metrics.total)}</span>
+                </div>
+
+                <div class="summary-section progress-section">
+                    <div class="flex justify-between items-center mb-1">
+                       <span class="summary-label">Progresso da Meta</span>
+                       <span class="font-bold text-cyan-400">${goalProgress.toFixed(1)}%</span>
+                    </div>
+                    <div class="progress-bar-bg">
+                        <div class="progress-bar" style="width: ${Math.max(0, Math.min(100, goalProgress))}%;"></div>
+                    </div>
+                </div>
+
+                <div class="summary-section">
+                    <div class="summary-item">
+                        <span class="summary-label">Falta para Objetivo</span>
+                        <span class="summary-value">${formatCurrency(metrics.faltaObjetivo, false)}</span>
+                    </div>
+                    <div class="summary-item">
+                        <span class="summary-label">Meta Diária (Estimada)</span>
+                        <span class="summary-value">${metrics.remainingWorkingDays > 0 ? formatCurrency(metrics.dailyTarget) : 'N/A'}</span>
+                    </div>
+                </div>
+                
+                <div class="summary-section grid grid-cols-2 gap-4">
+                    <div class="summary-item-small">
+                        <span class="summary-label">Dias Positivos</span>
+                        <span class="summary-value text-positivo">${metrics.diasPositivos}</span>
+                    </div>
+                     <div class="summary-item-small">
+                        <span class="summary-label">Dias Negativos</span>
+                        <span class="summary-value text-negativo">${metrics.diasNegativos}</span>
+                    </div>
+                    <div class="summary-item-small col-span-2">
+                        <span class="summary-label">Média Dias Positivos</span>
+                        <span class="summary-value text-sm">${formatCurrency(metrics.mediaPositivos, false)}</span>
+                    </div>
+                     <div class="summary-item-small col-span-2">
+                        <span class="summary-label">Média Dias Negativos</span>
+                        <span class="summary-value text-sm">${formatCurrency(metrics.mediaNegativos)}</span>
+                    </div>
+                </div>
+            `;
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            document.getElementById('add-form').addEventListener('submit', saveResult);
+            monthSelector.addEventListener('change', changeMonth);
+            monthSelector.value = currentMonthIndex;
+            changeMonth(); 
+            initializeFirebase();
+        });
+
+        window.saveResult = saveResult;
+
+    </script>
+    <style>
+        :root {
+            --bg-deep-black: #0B0C10;
+            --bg-panel: rgba(26, 28, 36, 0.7);
+            --border-color: rgba(0, 123, 255, 0.3);
+            --neon-cyan: #00FFFF;
+            --neon-blue: #007BFF;
+            --text-primary: #E0E0E0;
+            --text-secondary: #A0A0A0;
+            --positive-green: #39FF14;
+            --negative-red: #FF3131;
+        }
+
+        body {
+            font-family: 'Exo 2', sans-serif;
+            background-color: var(--bg-deep-black);
+            color: var(--text-primary);
+        }
+
+        .dashboard-container {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 24px;
+        }
+        @media (min-width: 1024px) {
+            .dashboard-container {
+                grid-template-columns: 2.5fr 1fr;
+            }
+        }
+        
+        .panel {
+            background: var(--bg-panel);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        }
+
+        #monthly-title {
+            color: var(--neon-cyan);
+            text-shadow: 0 0 10px rgba(0, 255, 255, 0.5), 0 0 20px rgba(0, 255, 255, 0.3);
+        }
+
+        .tech-input, .tech-select {
+            background-color: var(--bg-deep-black);
+            border: 1px solid var(--neon-blue);
+            color: var(--text-primary);
+            border-radius: 8px;
+            padding: 0.75rem;
+            box-shadow: 0 0 8px rgba(0, 123, 255, 0.3), inset 0 0 5px rgba(0, 123, 255, 0.2);
+            transition: all 0.3s ease;
+        }
+        .tech-input:focus, .tech-select:focus {
+            outline: none;
+            box-shadow: 0 0 12px rgba(0, 123, 255, 0.7), inset 0 0 8px rgba(0, 123, 255, 0.4);
+            border-color: var(--neon-cyan);
+        }
+
+        .tech-button {
+            background: linear-gradient(45deg, var(--neon-blue), var(--neon-cyan));
+            color: var(--bg-deep-black);
+            font-weight: 700;
+            border-radius: 8px;
+            padding: 0.75rem;
+            border: none;
+            box-shadow: 0 0 15px rgba(0, 123, 255, 0.5);
+            transition: all 0.3s ease;
+        }
+        .tech-button:hover {
+            box-shadow: 0 0 25px rgba(0, 255, 255, 0.7);
+            transform: translateY(-2px);
+        }
+        
+        .calendar-header {
+            display: grid;
+            grid-template-columns: repeat(7, 1fr);
+            text-align: center;
+            font-weight: 700;
+            padding: 1rem 0;
+            color: var(--neon-cyan);
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .calendar-grid {
+            display: grid;
+            grid-template-columns: repeat(7, 1fr);
+            gap: 8px;
+            padding: 8px;
+        }
+
+        .calendar-day {
+            min-height: 90px;
+            padding: 8px;
+            border-radius: 8px;
+            background-color: rgba(255, 255, 255, 0.03);
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            transition: all 0.3s ease;
+            border: 1px solid transparent;
+        }
+        .calendar-day:hover {
+            transform: translateY(-4px);
+            background-color: rgba(0, 123, 255, 0.1);
+            border-color: var(--border-color);
+        }
+
+        .day-number { font-weight: 600; color: var(--text-secondary); }
+        .day-result { text-align: right; font-weight: 700; font-size: 0.9rem; }
+        
+        .dia-positivo { border-left: 4px solid var(--positive-green); }
+        .dia-negativo { border-left: 4px solid var(--negative-red); }
+        .text-positivo { color: var(--positive-green); text-shadow: 0 0 5px rgba(57, 255, 20, 0.5); }
+        .text-negativo { color: var(--negative-red); text-shadow: 0 0 5px rgba(255, 49, 49, 0.5); }
+        
+        .gr-excedido {
+            background-color: rgba(255, 49, 49, 0.15);
+            border: 1px solid var(--negative-red);
+            box-shadow: 0 0 10px rgba(255, 49, 49, 0.4);
+        }
+        .final-semana { background-color: rgba(255, 255, 255, 0.01); }
+        .empty-day { background-color: transparent; opacity: 0.5; }
+
+        .summary-section {
+            padding: 1rem 0;
+            border-bottom: 1px solid var(--border-color);
+        }
+        .summary-section:last-child { border-bottom: none; }
+        
+        .summary-item, .summary-item-small {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.5rem 0;
+        }
+        .summary-item-small { flex-direction: column; align-items: flex-start; background-color: rgba(0,0,0,0.2); padding: 0.75rem; border-radius: 8px; }
+        
+        .summary-label { color: var(--text-secondary); font-size: 0.9rem; }
+        .summary-value { font-weight: 700; font-size: 1.1rem; }
+        .summary-input { background: transparent; border: none; border-bottom: 2px solid var(--neon-blue); text-align: right; color: white; width: 100px; }
+        .summary-input:focus { outline: none; }
+        
+        .total-section { background-color: rgba(0, 255, 255, 0.05); padding: 1rem; border-radius: 8px; }
+        
+        .progress-bar-bg { background-color: rgba(0,0,0,0.3); height: 8px; border-radius: 4px; overflow: hidden; }
+        .progress-bar { background: linear-gradient(90deg, var(--neon-blue), var(--neon-cyan)); height: 100%; border-radius: 4px; }
+
+    </style>
+</head>
+<body class="p-4 md:p-6">
+    <div class="mx-auto max-w-7xl">
+        <h1 class="text-3xl lg:text-4xl font-extrabold mb-6 text-center" id="app-title">
+            <span id="monthly-title">Performance Mensal</span>
+        </h1>
+        
+        <div class="panel p-4 lg:p-6 mb-6">
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
+                <div class="col-span-1 md:col-span-1">
+                    <label for="month-selector" class="block text-sm font-medium text-gray-400 mb-2">Mês de Análise</label>
+                    <select id="month-selector" class="tech-select w-full">
+                        <option value="9">Outubro / 2025</option>
+                        <option value="10">Novembro / 2025</option>
+                        <option value="11">Dezembro / 2025</option>
+                    </select>
+                </div>
+                <form id="add-form" class="grid grid-cols-2 md:grid-cols-3 col-span-1 md:col-span-3 gap-4 items-end">
+                    <div class="col-span-1">
+                        <label for="data-input" class="block text-sm font-medium text-gray-400 mb-2">Data</label>
+                        <input type="date" id="data-input" required class="tech-input w-full">
+                    </div>
+                    <div class="col-span-1">
+                        <label for="resultado-input" class="block text-sm font-medium text-gray-400 mb-2">Resultado (R$)</label>
+                        <input type="number" step="0.01" id="resultado-input" placeholder="Ex: 412.00" required class="tech-input w-full">
+                    </div>
+                    <div class="col-span-2 md:col-span-1">
+                        <button type="submit" class="tech-button w-full">
+                            Adicionar Registro
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <div class="dashboard-container">
+            <!-- PAINEL PRINCIPAL: CALENDÁRIO -->
+            <div class="panel">
+                <div class="calendar-header">
+                    <div>DOM</div><div>SEG</div><div>TER</div><div>QUA</div><div>QUI</div><div>SEX</div><div>SAB</div>
+                </div>
+                <div class="calendar-grid" id="calendar-grid">
+                    <!-- Células do calendário geradas via JS -->
+                </div>
+            </div>
+
+            <!-- PAINEL LATERAL: RESUMO -->
+            <div class="panel p-4 lg:p-6 h-fit">
+                 <div class="flex justify-between items-center mb-4">
+                     <h2 class="text-xl font-bold text-white">Resumo Financeiro</h2>
+                     <div id="loading-indicator" class="hidden flex items-center space-x-2">
+                        <div class="animate-spin rounded-full h-4 w-4 border-b-2 border-cyan-400"></div>
+                     </div>
+                 </div>
+                <div id="resumo-metrics">
+                    <p class="text-center text-gray-500">Aguardando dados...</p>
+                </div>
+                <p id="auth-status" class="text-xs text-center text-gray-600 mt-4">Conectando...</p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
+
+
